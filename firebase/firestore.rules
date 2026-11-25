@@ -1,0 +1,120 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function owner(uid) { return signedIn() && request.auth.uid == uid; }
+    function text(value, max) { return value is string && value.size() > 0 && value.size() <= max && value.matches('(?s).*[^\\s].*'); }
+    function bounded(value, max) { return value is string && value.size() <= max; }
+    function trip(id) { return get(/databases/$(database)/documents/trips/$(id)).data; }
+    function activeDriver() { return signedIn() && get(/databases/$(database)/documents/drivers/$(request.auth.uid)).data.active == true; }
+    function managedDriver(t) { return activeDriver() && t.get('driverId', '') == request.auth.uid; }
+    function admin() { return signedIn() && request.auth.token.get('driverAdmin', false) == true; }
+    function merchantAdmin() { return signedIn() && request.auth.token.get('merchantAdmin', false) == true; }
+    function merchantTrip(t) { return signedIn() && t.get('merchantId', '') == request.auth.uid; }
+    function dispatcher() { return admin() || (signedIn() && request.auth.token.get('dispatcher', false) == true); }
+    function liveStatus(t) { return t.status in ['assigned', 'en_route', 'in_progress']; }
+    function tripCreate(d) {
+      return d.keys().hasAll(['customerId','category','service','pickup','destination','status','createdAt'])
+          && d.keys().hasOnly(['customerId','category','service','pickup','destination','status','createdAt','scheduledAt','pickupDetails','pickupPostal','destinationPostal'])
+          && d.customerId == request.auth.uid && d.status == 'requested' && d.createdAt == request.time
+          && text(d.pickup,250) && text(d.destination,250)
+          && bounded(d.get('pickupDetails',''),300)
+          && (!('pickupPostal' in d) || (d.pickupPostal is string && d.pickupPostal.matches('T[0-9][ABCEGHJ-NPRSTV-Z][0-9][ABCEGHJ-NPRSTV-Z][0-9]')))
+          && (!('destinationPostal' in d) || (d.destinationPostal is string && d.destinationPostal.matches('T[0-9][ABCEGHJ-NPRSTV-Z][0-9][ABCEGHJ-NPRSTV-Z][0-9]')))
+          && ((d.category == 'ride' && d['service'] in ['Local ride','Scheduled ride','Medical ride','Airport ride','Out-of-town ride'])
+          || (d.category == 'delivery' && d['service'] in ['Grocery delivery','Parcel delivery','Prescription pickup','Document delivery']))
+          && (!('scheduledAt' in d) || (d.scheduledAt is timestamp && d.scheduledAt > request.time))
+          && (!(d['service'] in ['Scheduled ride','Medical ride','Airport ride']) || 'scheduledAt' in d);
+    }
+    match /customers/{uid} {
+      allow get: if owner(uid);
+      allow create, update: if owner(uid)
+          && request.resource.data.keys().hasOnly(['name','address','favoriteLocations','emergencyContact'])
+          && bounded(request.resource.data.name,100) && bounded(request.resource.data.address,250)
+          && bounded(request.resource.data.favoriteLocations,1000) && bounded(request.resource.data.emergencyContact,250);
+      match /devices/{id} {
+        allow delete: if owner(uid);
+        allow create, update: if owner(uid) && request.resource.data.keys().hasOnly(['token'])
+            && text(request.resource.data.token,4096);
+      }
+    }
+    match /trips/{id} {
+      allow get: if owner(resource.data.customerId) || managedDriver(resource.data) || merchantTrip(resource.data) || dispatcher();
+      allow list: if request.query.limit <= 50 && (owner(resource.data.customerId) || managedDriver(resource.data) || dispatcher());
+      allow create: if signedIn() && tripCreate(request.resource.data);
+      match /live/{idDoc} {
+        allow get: if idDoc == 'position' && (owner(trip(id).customerId) || merchantTrip(trip(id))) && liveStatus(trip(id));
+        allow create, update: if idDoc == 'position' && managedDriver(trip(id)) && liveStatus(trip(id))
+          && request.resource.data.keys().hasOnly(['latitude','longitude','updatedAt'])
+          && request.resource.data.latitude is number && request.resource.data.latitude >= -90 && request.resource.data.latitude <= 90
+          && request.resource.data.longitude is number && request.resource.data.longitude >= -180 && request.resource.data.longitude <= 180
+          && request.resource.data.updatedAt == request.time;
+      }
+      match /reviews/{uid} {
+        allow get: if owner(uid) && trip(id).customerId == uid;
+        allow create: if owner(uid) && trip(id).customerId == uid && trip(id).status == 'completed'
+          && request.resource.data.keys().hasOnly(['rating','comment','createdAt'])
+          && request.resource.data.rating is int && request.resource.data.rating >= 1 && request.resource.data.rating <= 5
+          && bounded(request.resource.data.comment,1000) && request.resource.data.createdAt == request.time;
+      }
+    }
+    match /driverApplications/{uid} {
+      allow get: if owner(uid) || admin();
+      allow list: if admin() && request.query.limit <= 50;
+    }
+    match /drivers/{uid} {
+      allow get: if owner(uid) || dispatcher();
+      allow list: if dispatcher() && request.query.limit <= 50;
+      match /offers/{offer} {
+        allow get: if owner(uid) && activeDriver();
+        allow list: if owner(uid) && activeDriver() && request.query.limit <= 25;
+      }
+      match /ledger/{entry} {
+        allow get: if owner(uid) || dispatcher();
+        allow list: if (owner(uid) || dispatcher()) && request.query.limit <= 50;
+      }
+    }
+    match /merchantApplications/{uid} {
+      allow get: if owner(uid) || merchantAdmin();
+      allow list: if merchantAdmin() && request.query.limit <= 50;
+    }
+    match /marketStores/{uid} {
+      allow get: if resource.data.published == true || owner(uid);
+      allow list: if resource.data.published == true && request.query.limit <= 50;
+    }
+    match /marketItems/{id} {
+      allow get: if resource.data.published == true || owner(resource.data.storeId);
+      allow list: if request.query.limit <= 50 && (resource.data.published == true || owner(resource.data.storeId));
+    }
+    match /marketOrders/{id} {
+      allow get: if owner(resource.data.customerId) || owner(resource.data.storeId);
+      allow list: if request.query.limit <= 50 && (owner(resource.data.customerId) || owner(resource.data.storeId));
+    }
+    match /marketCustomers/{uid}/favorites/{storeId} {
+      allow get, delete: if owner(uid);
+      allow list: if owner(uid) && request.query.limit <= 50;
+      allow create, update: if owner(uid)
+        && request.resource.data.keys().hasOnly(['createdAt'])
+        && request.resource.data.createdAt == request.time
+        && get(/databases/$(database)/documents/marketStores/$(storeId)).data.published == true;
+    }
+    function paymentAdmin() { return signedIn() && request.auth.token.get('paymentAdmin', false) == true; }
+    match /payments/{id} {
+      allow get: if paymentAdmin();
+      allow list: if paymentAdmin() && request.query.limit <= 50;
+    }
+    match /paymentAllocations/{id} {
+      allow get: if paymentAdmin();
+      allow list: if paymentAdmin() && request.query.limit <= 50;
+    }
+    match /paymentSettings/{id} {
+      allow get: if paymentAdmin();
+    }
+    match /inquiries/{id} {
+      allow get: if owner(resource.data.customerId);
+      allow create: if signedIn() && request.resource.data.keys().hasOnly(['customerId','name','email','message','createdAt'])
+        && request.resource.data.customerId == request.auth.uid && request.resource.data.createdAt == request.time
+        && text(request.resource.data.name,100) && text(request.resource.data.email,254) && text(request.resource.data.message,2000);
+    }
+  }
+}

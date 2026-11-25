@@ -1,0 +1,31 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function owner(uid) { return request.auth != null && request.auth.uid == uid; }
+    function admin() { return request.auth != null && request.auth.token.get('driverAdmin', false) == true; }
+    match /merchant-documents/{uid}/{batch}/{kind} {
+      allow get: if owner(uid) || (request.auth != null && request.auth.token.get('merchantAdmin', false) == true);
+      allow create: if resource == null && owner(uid) && request.auth.token.email_verified == true
+        && batch.matches('[a-f0-9-]{36}') && kind in ['license','banking','menu']
+        && request.resource.size > 0 && request.resource.size <= 10485760
+        && request.resource.contentType in ['application/pdf','image/jpeg','image/png','image/webp'];
+    }
+    match /merchant-photo-staging/{uid}/{photo} {
+      allow get: if owner(uid);
+      allow create: if resource == null && owner(uid) && request.auth.token.email_verified == true
+        && photo.matches('[a-f0-9-]{36}') && request.resource.size > 0 && request.resource.size <= 5242880
+        && request.resource.contentType in ['image/jpeg','image/png','image/webp'];
+    }
+    match /merchant-photos/{uid}/{photo} {
+      allow get: if true;
+    }
+    match /driver-documents/{uid}/{batch}/{kind} {
+      allow get: if owner(uid) || admin();
+      allow create: if resource == null && owner(uid) && request.auth.token.email_verified == true && batch.matches('[a-f0-9-]{36}')
+        && kind in ['photo','license','registration','insurance','record','inspection']
+        && request.resource.size > 0 && request.resource.size <= 10485760
+        && (request.resource.contentType in ['image/jpeg','image/png','image/webp']
+          || (kind != 'photo' && request.resource.contentType == 'application/pdf'));
+    }
+  }
+}

@@ -1,0 +1,20 @@
+# Local provider connections and credentials
+.netlify/
+.env
+.env.*
+!.env.example
+node_modules/
+
+# Provider files, release credentials and local logs
+*.log
+*.pem
+*.p8
+*.p12
+*.jks
+*.keystore
+key.properties
+local.properties
+GoogleService-Info.plist
+google-services.json
+*service-account*.json
+*serviceAccount*.json
